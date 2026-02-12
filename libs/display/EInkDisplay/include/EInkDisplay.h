@@ -17,6 +17,9 @@ class EInkDisplay {
     FAST_REFRESH   // Fast refresh using custom LUT
   };
 
+  // Override the DC pin (must be called before begin())
+  void setDcPin(int8_t pin) { _dc = pin; }
+
   // Initialize the display hardware and driver
   void begin();
 
