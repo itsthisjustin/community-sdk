@@ -25,33 +25,12 @@ InputManager::InputManager()
       releasedEvents(0),
       lastDebounceTime(0),
       buttonPressStart(0),
-      buttonPressFinish(0),
-      numChannels_(2),
-      powerButtonPin_(POWER_BUTTON_PIN) {
-  channels_[0] = {BUTTON_ADC_PIN_1, NUM_BUTTONS_1, 0, ADC_RANGES_1};
-  channels_[1] = {BUTTON_ADC_PIN_2, NUM_BUTTONS_2, 4, ADC_RANGES_2};
-}
-
-InputManager::InputManager(const InputConfig& config)
-    : currentState(0),
-      lastState(0),
-      pressedEvents(0),
-      releasedEvents(0),
-      lastDebounceTime(0),
-      buttonPressStart(0),
-      buttonPressFinish(0),
-      numChannels_(config.numChannels > MAX_CHANNELS ? MAX_CHANNELS : config.numChannels),
-      powerButtonPin_(config.powerButtonPin) {
-  for (int i = 0; i < numChannels_; i++) {
-    channels_[i] = config.channels[i];
-  }
-}
+      buttonPressFinish(0) {}
 
 void InputManager::begin() {
-  for (int i = 0; i < numChannels_; i++) {
-    pinMode(channels_[i].pin, INPUT);
-  }
-  pinMode(powerButtonPin_, INPUT_PULLUP);
+  pinMode(BUTTON_ADC_PIN_1, INPUT);
+  pinMode(BUTTON_ADC_PIN_2, INPUT);
+  pinMode(POWER_BUTTON_PIN, INPUT_PULLUP);
   analogSetAttenuation(ADC_11db);
 }
 
@@ -68,16 +47,22 @@ int InputManager::getButtonFromADC(const int adcValue, const int ranges[], const
 uint8_t InputManager::getState() {
   uint8_t state = 0;
 
-  for (int i = 0; i < numChannels_; i++) {
-    const int adcValue = analogRead(channels_[i].pin);
-    const int button = getButtonFromADC(adcValue, channels_[i].ranges, channels_[i].numButtons);
-    if (button >= 0) {
-      state |= (1 << (button + channels_[i].bitOffset));
-    }
+  // Read GPIO1 buttons
+  const int adcValue1 = analogRead(BUTTON_ADC_PIN_1);
+  const int button1 = getButtonFromADC(adcValue1, ADC_RANGES_1, NUM_BUTTONS_1);
+  if (button1 >= 0) {
+    state |= (1 << button1);
+  }
+
+  // Read GPIO2 buttons
+  const int adcValue2 = analogRead(BUTTON_ADC_PIN_2);
+  const int button2 = getButtonFromADC(adcValue2, ADC_RANGES_2, NUM_BUTTONS_2);
+  if (button2 >= 0) {
+    state |= (1 << (button2 + 4));
   }
 
   // Read power button (digital, active LOW)
-  if (digitalRead(powerButtonPin_) == LOW) {
+  if (digitalRead(POWER_BUTTON_PIN) == LOW) {
     state |= (1 << BTN_POWER);
   }
 

@@ -2,23 +2,9 @@
 
 #include <Arduino.h>
 
-struct InputChannelConfig {
-  int pin;
-  int numButtons;
-  int bitOffset;
-  const int* ranges;  // array of numButtons+1 thresholds
-};
-
-struct InputConfig {
-  const InputChannelConfig* channels;
-  int numChannels;
-  int powerButtonPin;
-};
-
 class InputManager {
  public:
   InputManager();
-  explicit InputManager(const InputConfig& config);
   void begin();
   uint8_t getState();
 
@@ -85,7 +71,7 @@ class InputManager {
   static constexpr uint8_t BTN_DOWN = 5;
   static constexpr uint8_t BTN_POWER = 6;
 
-  // Default X4 pins (kept for backward compat)
+  // Pins
   static constexpr int BUTTON_ADC_PIN_1 = 1;
   static constexpr int BUTTON_ADC_PIN_2 = 2;
   static constexpr int POWER_BUTTON_PIN = 3;
@@ -107,13 +93,6 @@ class InputManager {
   unsigned long buttonPressStart;
   unsigned long buttonPressFinish;
 
-  // Runtime channel config
-  static constexpr int MAX_CHANNELS = 4;
-  InputChannelConfig channels_[MAX_CHANNELS];
-  int numChannels_;
-  int powerButtonPin_;
-
-  // Default X4 ADC ranges
   static constexpr int NUM_BUTTONS_1 = 4;
   static const int ADC_RANGES_1[];
 
