@@ -180,6 +180,8 @@ void EInkDisplay::setDisplayDimensions(uint16_t width, uint16_t height) {
   bufferSize = displayWidthBytes * height;
 }
 
+void EInkDisplay::requestResync() { _x3ForceFullSyncNext = _x3ReverseExactMode; }
+
 EInkDisplay::EInkDisplay(int8_t sclk, int8_t mosi, int8_t cs, int8_t dc, int8_t rst, int8_t busy)
     : _sclk(sclk),
       _mosi(mosi),
@@ -209,6 +211,7 @@ void EInkDisplay::begin() {
   _x3PrevFrameValid = false;
   _x3ReverseExactMode = (_dc == 4 && displayWidth == 792 && displayHeight == 528);
   _x3InitialFullSyncsRemaining = _x3ReverseExactMode ? 2 : 0;
+  _x3ForceFullSyncNext = false;
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
   if (Serial) Serial.printf("[%lu]   Static frame buffer (%lu bytes)\n", millis(), bufferSize);
 #else
@@ -621,6 +624,11 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
   }
 
   if (_x3ReverseExactMode) {
+    // X3 wake policy: first redraw after panel-off should be full.
+    if (!isScreenOn) {
+      mode = FULL_REFRESH;
+    }
+
     const bool fastMode = (mode == FAST_REFRESH);
     uint8_t row[128];
     auto sendCommandDataX3 = [&](uint8_t cmd, const uint8_t* data, uint16_t len) {
@@ -669,6 +677,7 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
     uint16_t minY = displayHeight;
     uint16_t maxY = 0;
     uint32_t diffBytes = 0;
+    uint32_t windowBytes = 0;
     if (fastMode && _x3PrevFrameValid) {
       for (uint16_t y = 0; y < displayHeight; y++) {
         const uint32_t rowOffset = static_cast<uint32_t>(y) * displayWidthBytes;
@@ -685,13 +694,28 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
       }
       if (diffBytes > 0) {
         usePartialWindow = true;
+        const uint16_t winWBytes = static_cast<uint16_t>(maxXByte - minXByte + 1);
+        const uint16_t winH = static_cast<uint16_t>(maxY - minY + 1);
+        windowBytes = static_cast<uint32_t>(winWBytes) * winH;
       }
     }
-    if (fastMode && _x3PrevFrameValid && !usePartialWindow) return;
+    if (fastMode && _x3PrevFrameValid && !usePartialWindow && !_x3ForceFullSyncNext) return;
+
     const bool canRunFastPartial = (_x3InitialFullSyncsRemaining == 0);
-    const bool runFastPartial = canRunFastPartial && fastMode && _x3PrevFrameValid && usePartialWindow;
+    // Keep FAST partial for small UI deltas only.
+    // Use changed-byte count (not bounding-box area) so sparse Home updates
+    // remain fast-partial even when changes are in multiple distant regions.
+    constexpr uint32_t X3_PARTIAL_DIFF_MAX_BYTES = 12000;
+    const bool smallDelta = diffBytes <= X3_PARTIAL_DIFF_MAX_BYTES;
+    const bool runFastPartial =
+        canRunFastPartial && fastMode && _x3PrevFrameValid && usePartialWindow && smallDelta && !_x3ForceFullSyncNext;
     if (Serial) {
       Serial.printf("[%lu]   X3_OEM_%s\n", millis(), runFastPartial ? "PART" : "FULL");
+      if (fastMode && !runFastPartial) {
+        Serial.printf("[%lu]   X3 full sync reason: force=%s diff=%lu(th=%lu) win=%lu/%lu\n", millis(),
+                      _x3ForceFullSyncNext ? "yes" : "no", diffBytes,
+                      static_cast<unsigned long>(X3_PARTIAL_DIFF_MAX_BYTES), windowBytes, bufferSize);
+      }
     }
     if (runFastPartial) {
       sendCommandDataX3(0x20, lut_x3_vcom_full, 42);
@@ -746,11 +770,54 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
     waitForRefresh(" X3_CMD12");
     if (!fastMode) delay(200);
 
+    const bool forcedFullSync = _x3ForceFullSyncNext;
+    const bool runPostHomeConditioning = (!runFastPartial && forcedFullSync);
+
     memcpy(_x3PrevFrame, frameBuffer, bufferSize);
     _x3PrevFrameValid = true;
     if (!runFastPartial && _x3InitialFullSyncsRemaining > 0) {
       _x3InitialFullSyncsRemaining--;
     }
+    _x3ForceFullSyncNext = false;
+
+    if (runPostHomeConditioning) {
+      // Mimic the empirically observed "settles after several PART updates" effect
+      // immediately after the first Home full sync so the user sees a stable UI sooner.
+      const uint16_t xStart = 0;
+      const uint16_t xEnd = static_cast<uint16_t>(displayWidth - 1);
+      const uint16_t yStart = 0;
+      const uint16_t yEnd = static_cast<uint16_t>(displayHeight - 1);
+      const uint8_t w[9] = {
+          static_cast<uint8_t>(xStart >> 8), static_cast<uint8_t>(xStart & 0xFF), static_cast<uint8_t>(xEnd >> 8),
+          static_cast<uint8_t>(xEnd & 0xFF), static_cast<uint8_t>(yStart >> 8), static_cast<uint8_t>(yStart & 0xFF),
+          static_cast<uint8_t>(yEnd >> 8), static_cast<uint8_t>(yEnd & 0xFF), 0x01};
+
+      sendCommandDataX3(0x20, lut_x3_vcom_full, 42);
+      sendCommandDataX3(0x21, lut_x3_ww_full, 42);
+      sendCommandDataX3(0x22, lut_x3_bw_full, 42);
+      sendCommandDataX3(0x23, lut_x3_wb_full, 42);
+      sendCommandDataX3(0x24, lut_x3_bb_full, 42);
+      sendCommandDataByteX3(0x50, 0x29, 0x07);
+
+      for (uint8_t i = 0; i < 6; i++) {
+        if (Serial) Serial.printf("[%lu]   X3_OEM_COND %u/6\n", millis(), static_cast<unsigned>(i + 1));
+        sendCommand(0x91);
+        sendCommandDataX3(0x90, w, 9);
+        sendCommand(0x13);
+        sendMirroredWindowPlane(frameBuffer, 0, static_cast<uint16_t>(displayWidthBytes - 1), 0,
+                                static_cast<uint16_t>(displayHeight - 1), invertForPart);
+        sendCommand(0x92);
+        if (!isScreenOn) {
+          sendCommand(0x04);
+          waitForRefresh(" X3_CMD04");
+          isScreenOn = true;
+        }
+        if (Serial) Serial.printf("[%lu]   X3_OEM_TRIGGER=0x12(cond)\n", millis());
+        sendCommand(0x12);
+        waitForRefresh(" X3_CMD12(cond)");
+      }
+    }
+
     isScreenOn = !turnOffScreen;
     return;
   }
