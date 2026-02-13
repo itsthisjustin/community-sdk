@@ -208,9 +208,7 @@ void EInkDisplay::begin() {
   memset(frameBuffer0, 0xFF, bufferSize);
   _x3PrevFrameValid = false;
   _x3ReverseExactMode = (_dc == 4 && displayWidth == 792 && displayHeight == 528);
-  if (_x3ReverseExactMode && Serial) {
-    Serial.printf("[%lu]   X3_SIG: sdk-patch-2026-02-13-a\n", millis());
-  }
+  _x3InitialFullSyncsRemaining = _x3ReverseExactMode ? 2 : 0;
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
   if (Serial) Serial.printf("[%lu]   Static frame buffer (%lu bytes)\n", millis(), bufferSize);
 #else
@@ -689,20 +687,18 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
         usePartialWindow = true;
       }
     }
+    if (fastMode && _x3PrevFrameValid && !usePartialWindow) return;
+    const bool canRunFastPartial = (_x3InitialFullSyncsRemaining == 0);
+    const bool runFastPartial = canRunFastPartial && fastMode && _x3PrevFrameValid && usePartialWindow;
     if (Serial) {
-      if (fastMode) {
-        Serial.printf("[%lu]   X3 fast: diffBytes=%lu partial=%s\n", millis(), diffBytes, usePartialWindow ? "yes" : "no");
-      } else {
-        Serial.printf("[%lu]   X3 full/half path\n", millis());
-      }
+      Serial.printf("[%lu]   X3_OEM_%s\n", millis(), runFastPartial ? "PART" : "FULL");
     }
-
-    if (fastMode) {
-      sendCommandDataX3(0x20, lut_x3_vcom_fast, 42);
-      sendCommandDataX3(0x21, lut_x3_ww_fast, 42);
-      sendCommandDataX3(0x22, lut_x3_bw_fast, 42);
-      sendCommandDataX3(0x23, lut_x3_wb_fast, 42);
-      sendCommandDataX3(0x24, lut_x3_bb_fast, 42);
+    if (runFastPartial) {
+      sendCommandDataX3(0x20, lut_x3_vcom_full, 42);
+      sendCommandDataX3(0x21, lut_x3_ww_full, 42);
+      sendCommandDataX3(0x22, lut_x3_bw_full, 42);
+      sendCommandDataX3(0x23, lut_x3_wb_full, 42);
+      sendCommandDataX3(0x24, lut_x3_bb_full, 42);
     } else {
       sendCommandDataX3(0x20, lut_x3_vcom_img, 42);
       sendCommandDataX3(0x21, lut_x3_ww_img, 42);
@@ -711,16 +707,13 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
       sendCommandDataX3(0x24, lut_x3_bb_img, 42);
     }
 
-    const bool invertForThisMode = false;
-    if (usePartialWindow) {
+    const bool invertForPart = false;
+    const bool invertForFull = true;
+    if (runFastPartial) {
       const uint16_t xStart = static_cast<uint16_t>(minXByte * 8);
       const uint16_t xEnd = static_cast<uint16_t>((maxXByte + 1) * 8 - 1);
       const uint16_t yStart = static_cast<uint16_t>(displayHeight - 1 - maxY);
       const uint16_t yEnd = static_cast<uint16_t>(displayHeight - 1 - minY);
-      if (Serial) {
-        Serial.printf("[%lu]   X3 partial window: x=%u..%u y=%u..%u\n", millis(), xStart, xEnd, yStart, yEnd);
-      }
-
       sendCommand(0x91);
       const uint8_t w[9] = {
           static_cast<uint8_t>(xStart >> 8), static_cast<uint8_t>(xStart & 0xFF), static_cast<uint8_t>(xEnd >> 8),
@@ -729,19 +722,17 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
       sendCommandDataX3(0x90, w, 9);
 
       sendCommand(0x13);
-      sendMirroredWindowPlane(frameBuffer, minXByte, maxXByte, minY, maxY, invertForThisMode);
+      sendMirroredWindowPlane(frameBuffer, minXByte, maxXByte, minY, maxY, invertForPart);
       sendCommand(0x92);
     } else {
+      // Full-sync path: write both planes from current frame.
       sendCommand(0x13);
-      sendMirroredPlane(frameBuffer, invertForThisMode);
-      if (!fastMode) {
-        sendCommand(0x10);
-        if (_x3PrevFrameValid) sendMirroredPlane(_x3PrevFrame, invertForThisMode);
-        else sendMirroredPlane(frameBuffer, invertForThisMode);
-      }
+      sendMirroredPlane(frameBuffer, invertForFull);
+      sendCommand(0x10);
+      sendMirroredPlane(frameBuffer, invertForFull);
     }
 
-    if (fastMode) sendCommandDataByteX3(0x50, 0x29, 0x07);
+    if (runFastPartial) sendCommandDataByteX3(0x50, 0x29, 0x07);
     else sendCommandDataByteX3(0x50, 0xA9, 0x07);
 
     if (!isScreenOn) {
@@ -750,12 +741,16 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
       isScreenOn = true;
     }
 
+    if (Serial) Serial.printf("[%lu]   X3_OEM_TRIGGER=0x12\n", millis());
     sendCommand(0x12);
     waitForRefresh(" X3_CMD12");
     if (!fastMode) delay(200);
 
     memcpy(_x3PrevFrame, frameBuffer, bufferSize);
     _x3PrevFrameValid = true;
+    if (!runFastPartial && _x3InitialFullSyncsRemaining > 0) {
+      _x3InitialFullSyncsRemaining--;
+    }
     isScreenOn = !turnOffScreen;
     return;
   }

@@ -87,6 +87,7 @@ class EInkDisplay {
   uint32_t bufferSize = BUFFER_SIZE;
   bool _x3ReverseExactMode = false;
   bool _x3PrevFrameValid = false;
+  uint8_t _x3InitialFullSyncsRemaining = 0;
   uint8_t _x3PrevFrame[MAX_BUFFER_SIZE];
 
   // Frame buffer (statically allocated)
