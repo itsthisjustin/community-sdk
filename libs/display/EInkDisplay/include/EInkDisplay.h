@@ -89,7 +89,7 @@ class EInkDisplay {
   uint16_t displayWidthBytes = DISPLAY_WIDTH_BYTES;
   uint32_t bufferSize = BUFFER_SIZE;
   bool _x3Mode = false;
-  bool _x3PrevFrameValid = false;
+  bool _x3RedRamSynced = false;
   struct X3GrayState {
     bool lastBaseWasPartial = false;
     bool partialAlternate = false;
@@ -100,8 +100,6 @@ class EInkDisplay {
   uint8_t _x3InitialFullSyncsRemaining = 0;
   bool _x3ForceFullSyncNext = false;
   uint8_t _x3ForcedConditionPassesNext = 0;
-  uint8_t _x3PrevFrame[MAX_BUFFER_SIZE];
-
   // Frame buffer (statically allocated)
   uint8_t frameBuffer0[MAX_BUFFER_SIZE];
   uint8_t* frameBuffer;

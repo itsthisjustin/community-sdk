@@ -214,7 +214,7 @@ void EInkDisplay::begin() {
 
   // Initialize to white
   memset(frameBuffer0, 0xFF, bufferSize);
-  _x3PrevFrameValid = false;
+  _x3RedRamSynced = false;
   _x3Mode = (_dc == 4 && displayWidth == 792 && displayHeight == 528);
   _x3InitialFullSyncsRemaining = _x3Mode ? 2 : 0;
   _x3ForceFullSyncNext = false;
@@ -686,9 +686,9 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
   }
 
   if (_x3Mode) {
-    // X3 wake policy: firmware maintains _x3PrevFrame for diff computation,
-    // so we can use fast refresh even after power-off. CMD04 will re-power
-    // the charge pump before the next update.
+    // X3 update policy: RED RAM (0x10) on the controller stores the previous
+    // frame for differential updates, eliminating the 52 KB _x3PrevFrame
+    // software buffer.  CMD04 re-powers the charge pump when needed.
     const bool fastMode = (mode == FAST_REFRESH);
     uint8_t row[128];
     auto sendCommandDataX3 = [&](uint8_t cmd, const uint8_t* data, uint16_t len) {
@@ -717,119 +717,47 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
         sendData(row, displayWidthBytes);
       }
     };
-    auto sendMirroredWindowPlane = [&](const uint8_t* plane, uint16_t xByteStart, uint16_t xByteEnd, uint16_t srcYMin, uint16_t srcYMax, bool invertBits) {
-      const uint16_t bytesPerRow = static_cast<uint16_t>(xByteEnd - xByteStart + 1);
-      const uint16_t panelYStart = static_cast<uint16_t>(displayHeight - 1 - srcYMax);
-      const uint16_t panelYEnd = static_cast<uint16_t>(displayHeight - 1 - srcYMin);
-      for (uint16_t panelY = panelYStart; panelY <= panelYEnd; panelY++) {
-        const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - panelY);
-        const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes + xByteStart;
-        for (uint16_t x = 0; x < bytesPerRow; x++) {
-          row[x] = invertBits ? static_cast<uint8_t>(~src[x]) : src[x];
-        }
-        sendData(row, bytesPerRow);
-      }
-    };
 
-    bool usePartialWindow = false;
-    uint16_t minXByte = displayWidthBytes;
-    uint16_t maxXByte = 0;
-    uint16_t minY = displayHeight;
-    uint16_t maxY = 0;
-    uint32_t diffBytes = 0;
-    uint32_t windowBytes = 0;
-    if (fastMode && _x3PrevFrameValid) {
-      for (uint16_t y = 0; y < displayHeight; y++) {
-        const uint32_t rowOffset = static_cast<uint32_t>(y) * displayWidthBytes;
-        for (uint16_t xb = 0; xb < displayWidthBytes; xb++) {
-          if (frameBuffer[rowOffset + xb] == _x3PrevFrame[rowOffset + xb]) {
-            continue;
-          }
-          diffBytes++;
-          if (xb < minXByte) minXByte = xb;
-          if (xb > maxXByte) maxXByte = xb;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
-      }
-      if (diffBytes > 0) {
-        usePartialWindow = true;
-        const uint16_t winWBytes = static_cast<uint16_t>(maxXByte - minXByte + 1);
-        const uint16_t winH = static_cast<uint16_t>(maxY - minY + 1);
-        windowBytes = static_cast<uint32_t>(winWBytes) * winH;
-      }
-    }
-    if (fastMode && _x3PrevFrameValid && !usePartialWindow && !_x3ForceFullSyncNext) return;
-
-    const bool canRunFastPartial = (_x3InitialFullSyncsRemaining == 0);
-    // Keep FAST partial for small UI deltas only.
-    // Use changed-byte count (not bounding-box area) so sparse Home updates
-    // remain fast-partial even when changes are in multiple distant regions.
-    constexpr uint32_t X3_PARTIAL_DIFF_MAX_BYTES = 28000;
-    const bool smallDelta = diffBytes <= X3_PARTIAL_DIFF_MAX_BYTES;
     const bool forcedFullSync = _x3ForceFullSyncNext;
-    const bool runFastPartial =
-        canRunFastPartial && fastMode && _x3PrevFrameValid && usePartialWindow && smallDelta && !_x3ForceFullSyncNext;
-    if (Serial) {
-      Serial.printf("[%lu]   X3_OEM_%s\n", millis(), runFastPartial ? "PART" : "FULL");
-      if (fastMode && !runFastPartial) {
-        Serial.printf("[%lu]   X3 full sync reason: force=%s diff=%lu(th=%lu) win=%lu/%lu\n", millis(),
-                      _x3ForceFullSyncNext ? "yes" : "no", diffBytes,
-                      static_cast<unsigned long>(X3_PARTIAL_DIFF_MAX_BYTES), windowBytes, bufferSize);
-      }
-    }
-    _x3GrayState.lastBaseWasPartial = runFastPartial;
-    _x3GrayState.lastDiffBytes = diffBytes;
+    const bool doFullSync = !fastMode || !_x3RedRamSynced ||
+                            _x3InitialFullSyncsRemaining > 0 || forcedFullSync;
 
-    if (runFastPartial) {
-      sendCommandDataX3(0x20, lut_x3_vcom_full, 42);
-      sendCommandDataX3(0x21, lut_x3_ww_full, 42);
-      sendCommandDataX3(0x22, lut_x3_bw_full, 42);
-      sendCommandDataX3(0x23, lut_x3_wb_full, 42);
-      sendCommandDataX3(0x24, lut_x3_bb_full, 42);
-    } else {
+    if (Serial) {
+      Serial.printf("[%lu]   X3_OEM_%s\n", millis(), doFullSync ? "FULL" : "FAST");
+    }
+    _x3GrayState.lastBaseWasPartial = !doFullSync;
+    _x3GrayState.lastDiffBytes = 0;
+
+    if (doFullSync) {
+      // Full sync: img LUTs, inverted data to both RAMs
       sendCommandDataX3(0x20, lut_x3_vcom_img, 42);
       sendCommandDataX3(0x21, lut_x3_ww_img, 42);
       sendCommandDataX3(0x22, lut_x3_bw_img, 42);
       sendCommandDataX3(0x23, lut_x3_wb_img, 42);
       sendCommandDataX3(0x24, lut_x3_bb_img, 42);
-    }
 
-    const bool invertForPart = false;
-    const bool invertForFull = true;
-    if (runFastPartial) {
-      const uint16_t xStart = static_cast<uint16_t>(minXByte * 8);
-      const uint16_t xEnd = static_cast<uint16_t>((maxXByte + 1) * 8 - 1);
-      const uint16_t yStart = static_cast<uint16_t>(displayHeight - 1 - maxY);
-      const uint16_t yEnd = static_cast<uint16_t>(displayHeight - 1 - minY);
-      sendCommand(0x91);
-      const uint8_t w[9] = {
-          static_cast<uint8_t>(xStart >> 8), static_cast<uint8_t>(xStart & 0xFF), static_cast<uint8_t>(xEnd >> 8),
-          static_cast<uint8_t>(xEnd & 0xFF), static_cast<uint8_t>(yStart >> 8), static_cast<uint8_t>(yStart & 0xFF),
-          static_cast<uint8_t>(yEnd >> 8), static_cast<uint8_t>(yEnd & 0xFF), 0x01};
-      sendCommandDataX3(0x90, w, 9);
-
-      // Keep controller-side differential state coherent by updating both planes
-      // for the changed window: old(0x10)=previous frame, new(0x13)=current frame.
-      sendCommand(0x10);
-      sendMirroredWindowPlane(_x3PrevFrame, minXByte, maxXByte, minY, maxY, invertForPart);
       sendCommand(0x13);
-      sendMirroredWindowPlane(frameBuffer, minXByte, maxXByte, minY, maxY, invertForPart);
-      sendCommand(0x92);
+      sendMirroredPlane(frameBuffer, true);
+      sendCommand(0x10);
+      sendMirroredPlane(frameBuffer, true);
+
+      sendCommandDataByteX3(0x50, 0xA9, 0x07);
     } else {
-      // Full-sync path: write both planes from current frame.
+      // Fast differential: full LUTs, RED RAM (0x10) retains previous frame
+      sendCommandDataX3(0x20, lut_x3_vcom_full, 42);
+      sendCommandDataX3(0x21, lut_x3_ww_full, 42);
+      sendCommandDataX3(0x22, lut_x3_bw_full, 42);
+      sendCommandDataX3(0x23, lut_x3_wb_full, 42);
+      sendCommandDataX3(0x24, lut_x3_bb_full, 42);
+
+      // Write only new data to 0x13; controller diffs against 0x10
       sendCommand(0x13);
-      sendMirroredPlane(frameBuffer, invertForFull);
-      sendCommand(0x10);
-      sendMirroredPlane(frameBuffer, invertForFull);
+      sendMirroredPlane(frameBuffer, false);
+
+      sendCommandDataByteX3(0x50, 0x29, 0x07);
     }
 
-    if (runFastPartial) sendCommandDataByteX3(0x50, 0x29, 0x07);
-    else sendCommandDataByteX3(0x50, 0xA9, 0x07);
-
-    constexpr uint32_t X3_CMD04_FULL_DIFF_MIN_BYTES = 30000;
-    const bool needCmd04 = !isScreenOn || turnOffScreen || forcedFullSync || (!runFastPartial && !fastMode) ||
-                           (!runFastPartial && fastMode && diffBytes >= X3_CMD04_FULL_DIFF_MIN_BYTES);
+    const bool needCmd04 = !isScreenOn || turnOffScreen || doFullSync;
     if (needCmd04) {
       sendCommand(0x04);
       waitForRefresh(" X3_CMD04");
@@ -844,22 +772,12 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
     // One-time light settle after the first major full-sync improves early
     // page-turn quality on X3 without paying the old 6-pass cost.
     uint8_t postConditionPasses = 0;
-    if (!runFastPartial) {
+    if (doFullSync) {
       if (forcedFullSync) postConditionPasses = _x3ForcedConditionPassesNext;
       else if (_x3InitialFullSyncsRemaining == 1) postConditionPasses = 1;
     }
 
-    memcpy(_x3PrevFrame, frameBuffer, bufferSize);
-    _x3PrevFrameValid = true;
-    if (!runFastPartial && _x3InitialFullSyncsRemaining > 0) {
-      _x3InitialFullSyncsRemaining--;
-    }
-    _x3ForceFullSyncNext = false;
-    _x3ForcedConditionPassesNext = 0;
-
     if (postConditionPasses > 0) {
-      // Mimic the empirically observed "settles after several PART updates" effect
-      // immediately after the first Home full sync so the user sees a stable UI sooner.
       const uint16_t xStart = 0;
       const uint16_t xEnd = static_cast<uint16_t>(displayWidth - 1);
       const uint16_t yStart = 0;
@@ -881,8 +799,7 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
         sendCommand(0x91);
         sendCommandDataX3(0x90, w, 9);
         sendCommand(0x13);
-        sendMirroredWindowPlane(frameBuffer, 0, static_cast<uint16_t>(displayWidthBytes - 1), 0,
-                                static_cast<uint16_t>(displayHeight - 1), invertForPart);
+        sendMirroredPlane(frameBuffer, false);
         sendCommand(0x92);
         if (!isScreenOn) {
           sendCommand(0x04);
@@ -894,6 +811,17 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
         waitForRefresh(" X3_CMD12(cond)");
       }
     }
+
+    // Sync RED RAM (0x10) with non-inverted current frame for next fast diff
+    sendCommand(0x10);
+    sendMirroredPlane(frameBuffer, false);
+    _x3RedRamSynced = true;
+
+    if (doFullSync && _x3InitialFullSyncsRemaining > 0) {
+      _x3InitialFullSyncsRemaining--;
+    }
+    _x3ForceFullSyncNext = false;
+    _x3ForcedConditionPassesNext = 0;
 
     isScreenOn = !turnOffScreen;
     return;
@@ -1093,12 +1021,8 @@ void EInkDisplay::displayGrayBuffer(const bool turnOffScreen) {
       }
     }
 
-    // Keep renderer/controller state coherent for subsequent differential updates.
-    if (_x3PrevFrameValid) {
-      memcpy(frameBuffer, _x3PrevFrame, bufferSize);
-      setRamArea(0, 0, displayWidth, displayHeight);
-      writeRamBuffer(CMD_WRITE_RAM_RED, _x3PrevFrame, bufferSize);
-    }
+    // Grayscale planes overwrote RED RAM (0x10); force full sync on next update.
+    _x3RedRamSynced = false;
 
     _x3GrayState.lsbValid = false;
     // Keep normal cadence to avoid making each page turn pay an extra full-sync cost.
