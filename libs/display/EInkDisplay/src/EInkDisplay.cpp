@@ -151,7 +151,7 @@ const uint8_t lut_x3_bb_img[] PROGMEM = {
     0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-// X3 fast partial-style LUTs
+// X3 AA LUTs: fast partial-style set tuned to preserve X3 polarity behavior.
 const uint8_t lut_x3_vcom_fast[] PROGMEM = {
     0x00, 0x18, 0x18, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -172,6 +172,9 @@ const uint8_t lut_x3_bb_fast[] PROGMEM = {
     0x90, 0x18, 0x18, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+constexpr uint32_t X3_GRAY_SETTLE1_DIFF_BYTES = 28000;
+constexpr uint32_t X3_GRAY_SETTLE2_DIFF_BYTES = 36000;
 
 void EInkDisplay::setDisplayDimensions(uint16_t width, uint16_t height) {
   displayWidth = width;
@@ -215,7 +218,8 @@ void EInkDisplay::begin() {
   _x3Mode = (_dc == 4 && displayWidth == 792 && displayHeight == 528);
   _x3InitialFullSyncsRemaining = _x3Mode ? 2 : 0;
   _x3ForceFullSyncNext = false;
-    _x3ForcedConditionPassesNext = 0;
+  _x3ForcedConditionPassesNext = 0;
+  _x3GrayState = {};
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
   if (Serial) Serial.printf("[%lu]   Static frame buffer (%lu bytes)\n", millis(), bufferSize);
 #else
@@ -587,16 +591,70 @@ void EInkDisplay::grayscaleRevert() {
 }
 
 void EInkDisplay::copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer) {
+  if (!lsbBuffer) {
+    _x3GrayState.lsbValid = false;
+    return;
+  }
+
+  if (_x3Mode) {
+    // X3 single-pass AA: write LSB plane to old-data RAM.
+    uint8_t row[128];
+    auto sendMirroredPlane = [&](const uint8_t* plane) {
+      for (uint16_t y = 0; y < displayHeight; y++) {
+        const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
+        const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
+        for (uint16_t x = 0; x < displayWidthBytes; x++) {
+          row[x] = ~src[x];
+        }
+        sendData(row, displayWidthBytes);
+      }
+    };
+
+    sendCommand(0x10);
+    sendMirroredPlane(lsbBuffer);
+    _x3GrayState.lsbValid = true;
+    return;
+  }
   setRamArea(0, 0, displayWidth, displayHeight);
   writeRamBuffer(CMD_WRITE_RAM_BW, lsbBuffer, bufferSize);
 }
 
 void EInkDisplay::copyGrayscaleMsbBuffers(const uint8_t* msbBuffer) {
+  if (!msbBuffer) {
+    return;
+  }
+
+  if (_x3Mode) {
+    if (!_x3GrayState.lsbValid) {
+      return;
+    }
+
+    uint8_t row[128];
+    auto sendMirroredPlane = [&](const uint8_t* plane) {
+      for (uint16_t y = 0; y < displayHeight; y++) {
+        const uint16_t srcY = static_cast<uint16_t>(displayHeight - 1 - y);
+        const uint8_t* src = plane + static_cast<uint32_t>(srcY) * displayWidthBytes;
+        for (uint16_t x = 0; x < displayWidthBytes; x++) {
+          row[x] = ~src[x];
+        }
+        sendData(row, displayWidthBytes);
+      }
+    };
+
+    sendCommand(0x13);
+    sendMirroredPlane(msbBuffer);
+    return;
+  }
   setRamArea(0, 0, displayWidth, displayHeight);
   writeRamBuffer(CMD_WRITE_RAM_RED, msbBuffer, bufferSize);
 }
 
 void EInkDisplay::copyGrayscaleBuffers(const uint8_t* lsbBuffer, const uint8_t* msbBuffer) {
+  if (_x3Mode) {
+    copyGrayscaleLsbBuffers(lsbBuffer);
+    copyGrayscaleMsbBuffers(msbBuffer);
+    return;
+  }
   setRamArea(0, 0, displayWidth, displayHeight);
   writeRamBuffer(CMD_WRITE_RAM_BW, lsbBuffer, bufferSize);
   writeRamBuffer(CMD_WRITE_RAM_RED, msbBuffer, bufferSize);
@@ -720,6 +778,9 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
                       static_cast<unsigned long>(X3_PARTIAL_DIFF_MAX_BYTES), windowBytes, bufferSize);
       }
     }
+    _x3GrayState.lastBaseWasPartial = runFastPartial;
+    _x3GrayState.lastDiffBytes = diffBytes;
+
     if (runFastPartial) {
       sendCommandDataX3(0x20, lut_x3_vcom_full, 42);
       sendCommandDataX3(0x21, lut_x3_ww_full, 42);
@@ -748,6 +809,10 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
           static_cast<uint8_t>(yEnd >> 8), static_cast<uint8_t>(yEnd & 0xFF), 0x01};
       sendCommandDataX3(0x90, w, 9);
 
+      // Keep controller-side differential state coherent by updating both planes
+      // for the changed window: old(0x10)=previous frame, new(0x13)=current frame.
+      sendCommand(0x10);
+      sendMirroredWindowPlane(_x3PrevFrame, minXByte, maxXByte, minY, maxY, invertForPart);
       sendCommand(0x13);
       sendMirroredWindowPlane(frameBuffer, minXByte, maxXByte, minY, maxY, invertForPart);
       sendCommand(0x92);
@@ -943,6 +1008,105 @@ void EInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
 }
 
 void EInkDisplay::displayGrayBuffer(const bool turnOffScreen) {
+  if (_x3Mode) {
+    // X3 AA pipeline: LSB->0x10 + MSB->0x13, trigger 0x12 with X3 LUT banks,
+    // then optionally run settle triggers on large partial deltas.
+    drawGrayscale = false;
+    inGrayscaleMode = false;
+
+    if (!_x3GrayState.lsbValid) {
+      return;
+    }
+
+    // Speed policy: on X3 partial page turns, run AA every other turn.
+    // This keeps AA active while reducing average page-turn latency.
+    if (_x3GrayState.lastBaseWasPartial) {
+      _x3GrayState.partialAlternate = !_x3GrayState.partialAlternate;
+      if (!_x3GrayState.partialAlternate) {
+        if (Serial) Serial.printf("[%lu]   X3_GRAY_SKIP(partial-alt)\n", millis());
+        _x3GrayState.lsbValid = false;
+        _x3ForcedConditionPassesNext = 0;
+        isScreenOn = !turnOffScreen;
+        return;
+      }
+    }
+
+    auto sendCommandDataX3 = [&](uint8_t cmd, const uint8_t* data, uint16_t len) {
+      SPI.beginTransaction(spiSettings);
+      digitalWrite(_cs, LOW);
+      digitalWrite(_dc, LOW);
+      SPI.transfer(cmd);
+      if (len > 0 && data != nullptr) {
+        digitalWrite(_dc, HIGH);
+        SPI.writeBytes(data, len);
+      }
+      digitalWrite(_cs, HIGH);
+      SPI.endTransaction();
+    };
+    auto sendCommandDataByteX3 = [&](uint8_t cmd, uint8_t d0, uint8_t d1) {
+      const uint8_t d[2] = {d0, d1};
+      sendCommandDataX3(cmd, d, 2);
+    };
+
+    const uint8_t* vcom = lut_x3_vcom_full;
+    const uint8_t* ww = lut_x3_bb_full;
+    const uint8_t* bw = lut_x3_bw_full;
+    const uint8_t* wb = lut_x3_wb_full;
+    const uint8_t* bb = lut_x3_bb_full;
+    uint8_t dataInterval0 = 0xA9;
+    uint8_t dataInterval1 = 0x07;
+    if (Serial) Serial.printf("[%lu]   X3_GRAY_MODE=fixed\n", millis());
+    sendCommandDataX3(0x20, vcom, 42);
+    sendCommandDataX3(0x21, ww, 42);
+    sendCommandDataX3(0x22, bw, 42);
+    sendCommandDataX3(0x23, wb, 42);
+    sendCommandDataX3(0x24, bb, 42);
+    sendCommandDataByteX3(0x50, dataInterval0, dataInterval1);
+
+    if (!isScreenOn) {
+      sendCommand(0x04);
+      waitForRefresh(" X3_CMD04(gray)");
+      isScreenOn = true;
+    }
+
+    sendCommand(0x12);
+    waitForRefresh(" X3_CMD12(gray)");
+
+    // X3 AA tuning: add extra gray settle triggers after PART updates when needed.
+    // This costs one more panel cycle, but reduces residual ghosting on text A/B turns.
+    if (_x3GrayState.lastBaseWasPartial) {
+      // Speed-first tuning: keep AA, but only run settle passes on very large deltas.
+      // Typical text page turns (~22k-25k changed bytes) will skip settles.
+      if (Serial) {
+        Serial.printf("[%lu]   X3_GRAY_DIFF=%lu th1=%lu th2=%lu\n", millis(),
+                      static_cast<unsigned long>(_x3GrayState.lastDiffBytes),
+                      static_cast<unsigned long>(X3_GRAY_SETTLE1_DIFF_BYTES),
+                      static_cast<unsigned long>(X3_GRAY_SETTLE2_DIFF_BYTES));
+      }
+      if (_x3GrayState.lastDiffBytes >= X3_GRAY_SETTLE1_DIFF_BYTES) {
+        sendCommand(0x12);
+        waitForRefresh(" X3_CMD12(gray-settle)");
+      }
+      if (_x3GrayState.lastDiffBytes >= X3_GRAY_SETTLE2_DIFF_BYTES) {
+        sendCommand(0x12);
+        waitForRefresh(" X3_CMD12(gray-settle2)");
+      }
+    }
+
+    // Keep renderer/controller state coherent for subsequent differential updates.
+    if (_x3PrevFrameValid) {
+      memcpy(frameBuffer, _x3PrevFrame, bufferSize);
+      setRamArea(0, 0, displayWidth, displayHeight);
+      writeRamBuffer(CMD_WRITE_RAM_RED, _x3PrevFrame, bufferSize);
+    }
+
+    _x3GrayState.lsbValid = false;
+    // Keep normal cadence to avoid making each page turn pay an extra full-sync cost.
+    _x3ForcedConditionPassesNext = 0;
+    isScreenOn = !turnOffScreen;
+    return;
+  }
+
   drawGrayscale = false;
   inGrayscaleMode = true;
 

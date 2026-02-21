@@ -90,6 +90,13 @@ class EInkDisplay {
   uint32_t bufferSize = BUFFER_SIZE;
   bool _x3Mode = false;
   bool _x3PrevFrameValid = false;
+  struct X3GrayState {
+    bool lastBaseWasPartial = false;
+    bool partialAlternate = false;
+    uint32_t lastDiffBytes = 0;
+    bool lsbValid = false;
+  };
+  X3GrayState _x3GrayState;
   uint8_t _x3InitialFullSyncsRemaining = 0;
   bool _x3ForceFullSyncNext = false;
   uint8_t _x3ForcedConditionPassesNext = 0;
