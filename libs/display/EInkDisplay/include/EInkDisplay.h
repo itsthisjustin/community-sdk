@@ -92,8 +92,6 @@ class EInkDisplay {
   bool _x3RedRamSynced = false;
   struct X3GrayState {
     bool lastBaseWasPartial = false;
-    bool partialAlternate = false;
-    uint32_t lastDiffBytes = 0;
     bool lsbValid = false;
   };
   X3GrayState _x3GrayState;
