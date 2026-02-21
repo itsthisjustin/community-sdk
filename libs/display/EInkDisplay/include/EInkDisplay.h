@@ -17,8 +17,8 @@ class EInkDisplay {
     FAST_REFRESH   // Fast refresh using custom LUT
   };
 
-  // Set display dimensions (must be called before begin())
-  void setDisplayDimensions(uint16_t width, uint16_t height);
+  // Set X3 panel geometry and mode (must be called before begin())
+  void setDisplayX3();
 
   // Initialize the display hardware and driver
   void begin();
@@ -28,6 +28,10 @@ class EInkDisplay {
   static constexpr uint16_t DISPLAY_HEIGHT = 480;
   static constexpr uint16_t DISPLAY_WIDTH_BYTES = DISPLAY_WIDTH / 8;
   static constexpr uint32_t BUFFER_SIZE = DISPLAY_WIDTH_BYTES * DISPLAY_HEIGHT;
+  static constexpr uint16_t X3_DISPLAY_WIDTH = 792;
+  static constexpr uint16_t X3_DISPLAY_HEIGHT = 528;
+  static constexpr uint16_t X3_DISPLAY_WIDTH_BYTES = X3_DISPLAY_WIDTH / 8;
+  static constexpr uint32_t X3_BUFFER_SIZE = X3_DISPLAY_WIDTH_BYTES * X3_DISPLAY_HEIGHT;
   static constexpr uint32_t MAX_BUFFER_SIZE = 52272;  // max(800x480, 792x528) / 8
 
   // Runtime dimensions
@@ -80,6 +84,9 @@ class EInkDisplay {
   void saveFrameBufferAsPBM(const char* filename);
 
  private:
+  // Internal geometry setter used by setDisplayX3().
+  void setDisplayDimensions(uint16_t width, uint16_t height);
+
   // Pin configuration
   int8_t _sclk, _mosi, _cs, _dc, _rst, _busy;
 

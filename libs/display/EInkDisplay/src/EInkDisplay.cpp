@@ -178,6 +178,12 @@ void EInkDisplay::setDisplayDimensions(uint16_t width, uint16_t height) {
   displayHeight = height;
   displayWidthBytes = width / 8;
   bufferSize = displayWidthBytes * height;
+  _x3Mode = false;
+}
+
+void EInkDisplay::setDisplayX3() {
+  setDisplayDimensions(X3_DISPLAY_WIDTH, X3_DISPLAY_HEIGHT);
+  _x3Mode = true;
 }
 
 void EInkDisplay::requestResync(uint8_t settlePasses) {
@@ -212,7 +218,6 @@ void EInkDisplay::begin() {
   // Initialize to white
   memset(frameBuffer0, 0xFF, bufferSize);
   _x3RedRamSynced = false;
-  _x3Mode = (_dc == 4 && displayWidth == 792 && displayHeight == 528);
   _x3InitialFullSyncsRemaining = _x3Mode ? 2 : 0;
   _x3ForceFullSyncNext = false;
   _x3ForcedConditionPassesNext = 0;
